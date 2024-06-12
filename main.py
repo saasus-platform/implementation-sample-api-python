@@ -1,6 +1,6 @@
 import uvicorn
-from typing import Union
-from fastapi import FastAPI, Request, Depends, HTTPException, Header
+from typing import Union, Optional
+from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
 from starlette.middleware.cors import CORSMiddleware
 
 from saasus_sdk_python import TenantUserApi
@@ -56,11 +56,23 @@ def get_user_info(user_info: dict = Depends(fastapi_auth)):
 
 
 @app.get("/users")
-def get_tenant_users(auth_user: dict = Depends(fastapi_auth)):
+def get_tenant_users(auth_user: dict = Depends(fastapi_auth), tenant_id: Optional[str] = Query(None)):
     if not auth_user.tenants:
         raise HTTPException(status_code=400, detail="No tenants found for the user")
 
-    tenant_id = auth_user.tenants[0].id
+    # クエリパラメータでテナントIDが渡されていない場合はエラー
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="No tenant found for the user")
+
+    # ユーザーが所属しているテナントか確認する
+    is_belonging_tenant = False
+    for tenant in auth_user.tenants:
+        if tenant.id == tenant_id:
+            is_belonging_tenant = True
+            break
+
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
 
     try:
         tenant_user_info = TenantUserApi(api_client=api_client).get_tenant_users(tenant_id=tenant_id,
