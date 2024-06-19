@@ -1,12 +1,19 @@
 import uvicorn
 from typing import Union, Optional
 from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
+from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
 from saasus_sdk_python import TenantUserApi
 from saasus_sdk_python import TenantApi
 from saasus_sdk_python import TenantAttributeApi
 from saasus_sdk_python import UserAttributeApi
+from saasus_sdk_python import SaasUserApi
+from saasus_sdk_python import TenantUserApi
+from saasus_sdk_python import RoleApi
+from saasus_sdk_python import CreateSaasUserParam
+from saasus_sdk_python import CreateTenantUserParam
+from saasus_sdk_python import CreateTenantUserRolesParam
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
 from saasus_sdk_python.client.client import SignedApiClient
@@ -132,6 +139,112 @@ def get_user_attributes(auth_user: dict = Depends(fastapi_auth)):
         user_attributes = UserAttributeApi(api_client=api_client).get_user_attributes()
 
         return user_attributes
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ユーザー登録用のPydanticモデルを定義
+class UserRegisterRequest(BaseModel):
+    email: str
+    password: str
+    tenantId: str
+    userAttributeValues: Optional[dict] = None
+
+
+# ユーザー登録
+@app.post("/user_register")
+async def user_register(request: UserRegisterRequest, auth_user: dict = Depends(fastapi_auth)):
+    # リクエストデータの取得
+    email = request.email
+    password = request.password
+    tenant_id = request.tenantId
+    user_attribute_values = request.userAttributeValues
+
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    is_belonging_tenant = belonging_tenant(auth_user.tenants, tenant_id)
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
+
+    # ユーザー登録処理
+    try:
+        # ユーザー属性情報を取得
+        user_attributes_obj = get_user_attributes()
+
+        # ユーザー属性情報でnumber型が定義されている場合は、置換する
+        if user_attribute_values is None:
+            user_attribute_values = []
+        else:
+            user_attributes = user_attributes_obj.user_attributes
+            for attribute in user_attributes:
+                attribute_name = attribute.attribute_name
+                attribute_type = attribute.attribute_type.value
+
+                if attribute_name in user_attribute_values:
+                    if attribute_type == "number":
+                        user_attribute_values[attribute_name] = int(user_attribute_values[attribute_name])
+
+        # SaaSユーザー登録用パラメータを作成
+        create_saas_user_param = CreateSaasUserParam(email=email, password=password)
+
+        # SaaSユーザーを登録
+        SaasUserApi(api_client=api_client).create_saas_user(create_saas_user_param=create_saas_user_param)
+
+        # テナントユーザー登録用のパラメータを作成
+        create_tenant_user_param = CreateTenantUserParam(email=email, attributes=user_attribute_values)
+
+        # 作成したSaaSユーザーをテナントユーザーに追加
+        tenant_user = TenantUserApi(api_client=api_client).create_tenant_user(tenant_id=tenant_id, create_tenant_user_param=create_tenant_user_param)
+
+        # テナントに定義されたロール一覧を取得
+        roles_obj = RoleApi(api_client=api_client).get_roles()
+
+        # 初期値はadmin（SaaS管理者）とする
+        add_role = "admin"
+
+        for role in roles_obj.roles:
+            # userが定義されていれば、設定するロールをuserにする
+            if role.role_name == "user":
+                add_role = role.role_name
+                break
+
+        # ロール設定用のパラメータを作成
+        create_tenant_user_roles_param = CreateTenantUserRolesParam(role_names=[add_role])
+
+        # 作成したテナントユーザーにロールを設定
+        TenantUserApi(api_client=api_client).create_tenant_user_roles(tenant_id=tenant_id, user_id=tenant_user.id, env_id=3, create_tenant_user_roles_param=create_tenant_user_roles_param)
+
+        return {"message": "User registered successfully"}
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UserDeleteRequest(BaseModel):
+    tenantId: str
+    userId: str
+
+
+@app.delete("/user_delete")
+def user_delete(request: UserDeleteRequest, auth_user: dict = Depends(fastapi_auth)):
+    # リクエストデータの取得
+    tenant_id = request.tenantId
+    user_id = request.userId
+
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    is_belonging_tenant = belonging_tenant(auth_user.tenants, tenant_id)
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
+
+    try:
+        # テナントからユーザー情報を削除
+        TenantUserApi(api_client=api_client).delete_tenant_user(tenant_id=tenant_id, user_id=user_id)
+
+        return {"message": "User delete successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
