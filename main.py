@@ -1,3 +1,4 @@
+import os
 import uvicorn
 from typing import Union, Optional
 from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
@@ -9,7 +10,6 @@ from saasus_sdk_python import TenantApi
 from saasus_sdk_python import TenantAttributeApi
 from saasus_sdk_python import UserAttributeApi
 from saasus_sdk_python import SaasUserApi
-from saasus_sdk_python import TenantUserApi
 from saasus_sdk_python import RoleApi
 from saasus_sdk_python import CreateSaasUserParam
 from saasus_sdk_python import CreateTenantUserParam
@@ -17,8 +17,18 @@ from saasus_sdk_python import CreateTenantUserRolesParam
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
 from saasus_sdk_python.client.client import SignedApiClient
+from sqlalchemy import create_engine, Column, Integer, String, TIMESTAMP, select
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.sql import func
 
 from dotenv import load_dotenv
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 load_dotenv()
 app = FastAPI()
@@ -53,6 +63,16 @@ def get_temp_code(request: Request):
     if not code:
         raise HTTPException(status_code=400, detail="code is not provided by query parameter")
     return code
+
+# DB依存性注入
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 
 # ユーザーが所属しているテナントか確認する
@@ -226,6 +246,22 @@ class UserDeleteRequest(BaseModel):
     tenantId: str
     userId: str
 
+class DeleteUserLog(Base):
+    __tablename__ = "delete_user_log"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), nullable=False)
+    user_id = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False)
+    delete_at = Column(TIMESTAMP, server_default=func.current_timestamp())
+
+
+class DeleteUserLogResponse(BaseModel):
+    id: int
+    tenant_id: str
+    user_id: str
+    email: str
+    delete_at: Optional[str]
+
 
 @app.delete("/user_delete")
 def user_delete(request: UserDeleteRequest, auth_user: dict = Depends(fastapi_auth)):
@@ -241,12 +277,65 @@ def user_delete(request: UserDeleteRequest, auth_user: dict = Depends(fastapi_au
         raise HTTPException(status_code=400, detail="Tenant that does not belong")
 
     try:
+        # ユーザー削除ログにメールアドレスを登録するため、SaaSusからユーザー情報を取得
+        delete_user = TenantUserApi(api_client=api_client).get_tenant_user(tenant_id=tenant_id, user_id=user_id)
+
         # テナントからユーザー情報を削除
         TenantUserApi(api_client=api_client).delete_tenant_user(tenant_id=tenant_id, user_id=user_id)
+
+        # ユーザー削除ログを設定
+        delete_user_log = DeleteUserLog(tenant_id=tenant_id, user_id=user_id, email=delete_user.email)
+
+        # 登録実行
+        db = SessionLocal()
+        try:
+            db.add(delete_user_log)
+            db.commit()
+            db.refresh(delete_user_log)
+        except Exception as e:
+            print(e)
+            db.rollback()
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            db.close()
 
         return {"message": "User delete successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ユーザー削除ログを取得
+@app.get("/delete_user_log", response_model=list[DeleteUserLogResponse])
+def get_delete_user_logs(tenant_id: str, auth_user: dict = Depends(fastapi_auth), db: Session = Depends(get_db)):
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    is_belonging_tenant = belonging_tenant(auth_user.tenants, tenant_id)
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
+
+    try:
+        # ユーザー削除ログを取得
+        query = select(DeleteUserLog).where(DeleteUserLog.tenant_id == tenant_id)
+        result = db.execute(query).scalars().all()
+
+        # SQLAlchemyのオブジェクトをPydanticモデルに変換
+        response_data = [
+            DeleteUserLogResponse(
+                id=log.id,
+                tenant_id=log.tenant_id,
+                user_id=log.user_id,
+                email=log.email,
+                delete_at=log.delete_at.isoformat() if log.delete_at else None
+            )
+            for log in result
+        ]
+
+        return response_data
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
