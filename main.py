@@ -5,18 +5,12 @@ from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from saasus_sdk_python import TenantUserApi
-from saasus_sdk_python import TenantApi
-from saasus_sdk_python import TenantAttributeApi
-from saasus_sdk_python import UserAttributeApi
-from saasus_sdk_python import SaasUserApi
-from saasus_sdk_python import RoleApi
-from saasus_sdk_python import CreateSaasUserParam
-from saasus_sdk_python import CreateTenantUserParam
-from saasus_sdk_python import CreateTenantUserRolesParam
+from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam
+from saasus_sdk_python.src.pricing import PricingPlansApi
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
-from saasus_sdk_python.client.client import SignedApiClient
+from saasus_sdk_python.client.auth_client import SignedAuthApiClient
+from saasus_sdk_python.client.pricing_client import SignedPricingApiClient
 from sqlalchemy import create_engine, Column, Integer, String, TIMESTAMP, select
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -34,8 +28,10 @@ load_dotenv()
 app = FastAPI()
 auth = Authenticate()
 callback = Callback()
-# ApiClientを継承したSignedApiClientを使う
-api_client = SignedApiClient()
+# ApiClientを継承したSignedAuthApiClientを使う
+api_client = SignedAuthApiClient()
+# ApiClientを継承したSignedPricingApiClientを使う
+pricing_api_client = SignedPricingApiClient()
 
 app.add_middleware(
     CORSMiddleware,
@@ -334,6 +330,26 @@ def get_delete_user_logs(tenant_id: str, auth_user: dict = Depends(fastapi_auth)
         return response_data
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 料金プランを取得
+@app.get("/pricing_plan")
+def get_pricing_plan(auth_user: dict = Depends(fastapi_auth), plan_id: Optional[str] = Query(None)):
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    # クエリパラメータでテナントIDが渡されていない場合はエラー
+    if not plan_id:
+        raise HTTPException(status_code=400, detail="No price plan found for the tenant")
+
+    try:
+        plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=plan_id)
+
+        return plan
+
+    except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
