@@ -99,3 +99,5 @@ Werkzeug==2.3.6
 xattr==0.10.1
 yarl==1.9.2
 zipp==3.16.2
+SQLAlchemy==2.0.31
+psycopg2-binary==2.9.9
