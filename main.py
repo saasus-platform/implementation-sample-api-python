@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam
+from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam, TenantProps
 from saasus_sdk_python.src.pricing import PricingPlansApi
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
@@ -352,6 +352,109 @@ def get_pricing_plan(auth_user: dict = Depends(fastapi_auth), plan_id: Optional[
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
+# テナント属性情報を取得
+@app.get("/tenant_attributes_list")
+def get_tenant_attributes_list(auth_user: dict = Depends(fastapi_auth)):
+    try:
+        tenant_attributes = TenantAttributeApi(api_client=api_client).get_tenant_attributes()
+
+        return tenant_attributes
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SelfSignupRequest(BaseModel):
+    tenantName: str
+    tenantAttributeValues: Optional[dict] = None
+    userAttributeValues: Optional[dict] = None
+
+
+# セルフサインアップ
+@app.post("/self_sign_up")
+async def self_signup(request: SelfSignupRequest, auth_user: dict = Depends(fastapi_auth)):
+
+    if auth_user.tenants:
+        raise HTTPException(status_code=400, detail="User is already associated with a tenant")
+
+    # リクエストデータの取得
+    tenant_name = request.tenantName
+    tenant_attribute_values = request.tenantAttributeValues
+    user_attribute_values = request.userAttributeValues
+    # ユーザー属性情報の取得
+    user_attributes_obj = get_user_attributes()
+    try:
+        # テナント属性情報の取得
+        tenant_attributes_obj = get_tenant_attributes_list()
+        # テナント属性情報で number 型が定義されている場合は置換する
+        if tenant_attribute_values is None:
+            tenant_attribute_values = {}
+        else:
+            tenant_attributes = tenant_attributes_obj.tenant_attributes
+            for attribute in tenant_attributes:
+                attribute_name = attribute.attribute_name
+                attribute_type = attribute.attribute_type.value
+
+                if attribute_name in tenant_attribute_values:
+                    if attribute_type == "number":
+                        tenant_attribute_values[attribute_name] = int(tenant_attribute_values[attribute_name])
+
+        # `TenantProps` のインスタンスを作成
+        tenant_props = TenantProps(
+            name=tenant_name,
+            attributes=tenant_attribute_values,
+            back_office_staff_email=auth_user.email  # 現在のユーザーのメールアドレスを利用
+        )
+
+        # テナントを作成
+        tenant_api = TenantApi(api_client=api_client)
+        created_tenant = tenant_api.create_tenant(body=tenant_props)
+
+        # 作成したテナントのIDを取得
+        tenant_id = created_tenant.id
+
+        # ユーザー属性情報の取得
+        user_attributes_obj = get_user_attributes()
+
+        # ユーザー属性情報で number 型が定義されている場合は置換する
+        if user_attribute_values is None:
+            user_attribute_values = {}
+        else:
+            user_attributes = user_attributes_obj.user_attributes
+            for attribute in user_attributes:
+                attribute_name = attribute.attribute_name
+                attribute_type = attribute.attribute_type.value
+
+                if attribute_name in user_attribute_values:
+                    if attribute_type == "number":
+                        user_attribute_values[attribute_name] = int(user_attribute_values[attribute_name])
+
+        # テナントユーザー登録用のパラメータを作成
+        create_tenant_user_param = CreateTenantUserParam(
+            email=auth_user.email,  # 登録者自身のメールアドレス
+            attributes=user_attribute_values
+        )
+
+        # SaaSユーザーをテナントユーザーに追加
+        tenant_user = TenantUserApi(api_client=api_client).create_tenant_user(
+            tenant_id=tenant_id,
+            create_tenant_user_param=create_tenant_user_param
+        )
+
+        # ロール設定用のパラメータを作成
+        create_tenant_user_roles_param = CreateTenantUserRolesParam(role_names=["admin"])
+
+        # 作成したテナントユーザーにロールを設定
+        TenantUserApi(api_client=api_client).create_tenant_user_roles(
+            tenant_id=tenant_id,
+            user_id=tenant_user.id,
+            env_id=3,
+            create_tenant_user_roles_param=create_tenant_user_roles_param
+        )
+
+        return {"message": "User successfully signed up to the tenant"}
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
