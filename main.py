@@ -1,7 +1,7 @@
 import os
 import uvicorn
 from typing import Union, Optional
-from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query, Cookie
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
@@ -454,6 +454,22 @@ async def self_signup(request: SelfSignupRequest, auth_user: dict = Depends(fast
 
     except Exception as e:
         print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# リフレッシュトークンからIDトークンを取得する
+@app.get("/refresh")
+def refresh(request: Request):
+    # クッキーから SaaSusRefreshToken を取得
+    saasus_refresh_token = request.cookies.get("SaaSusRefreshToken")
+    if not saasus_refresh_token:
+        raise HTTPException(status_code=400, detail="SaaSusRefreshToken is missing")
+
+    try:
+        # refresh_token を使って新しい認証情報を取得
+        credentials = callback.get_refresh_token_auth_credentials(saasus_refresh_token)
+
+        return credentials
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
