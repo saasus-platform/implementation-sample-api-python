@@ -46,7 +46,7 @@ app.add_middleware(
 def fastapi_auth(request: Request) -> Union[dict, HTTPException]:
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.replace("Bearer ", "") if "Bearer " in auth_header else ""
-    referer = request.headers.get("Referer", "")
+    referer = request.headers.get("X-Saasus-Referer", "")
     user_info, error = auth.authenticate(id_token=token, referer=referer)
     if error:
         raise HTTPException(status_code=401, detail=str(error))
