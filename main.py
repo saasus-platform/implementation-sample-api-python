@@ -1,7 +1,7 @@
 import os
 import uvicorn
 from typing import Union, Optional
-from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query, Cookie
+from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
@@ -471,6 +471,14 @@ def refresh(request: Request):
         return credentials
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ログアウト
+@app.post("/logout")
+def logout(response: Response):
+    # クライアントのクッキーを削除する
+    response.delete_cookie("SaaSusRefreshToken")
+    
+    return {"message": "Logged out successfully"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
