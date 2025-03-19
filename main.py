@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam, TenantProps
+from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam, TenantProps, MfaPreference, UpdateSoftwareTokenParam, CreateSecretCodeParam
 from saasus_sdk_python.src.pricing import PricingPlansApi
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
@@ -482,3 +482,102 @@ def logout(response: Response):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
+
+# MFAの状態を取得
+@app.get("/mfa_status")
+def get_mfa_status(auth_user: dict = Depends(fastapi_auth), request: Request = None):
+    try:
+        # SaaSus の API を使用してユーザーの MFA 設定を取得
+        response = SaasUserApi(api_client=api_client).get_user_mfa_preference(user_id=auth_user.id)
+        # MFA の有効/無効の状態を返す
+        return {"enabled": response.enabled}
+    except Exception as e:
+        print(e)  # 他のエンドポイントに合わせる
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# MFAのセットアップ情報を取得 (QRコードを発行)
+# フロントエンドアプリは、リクエストヘッダーに X-Access-Token を含める必要があります
+@app.get("/mfa_setup")
+def get_mfa_setup(request: Request, auth_user: dict = Depends(fastapi_auth)):
+    # リクエストヘッダーから X-Access-Token を取得
+    access_token = request.headers.get("X-Access-Token")
+    if not access_token:
+        # アクセストークンがない場合は、認証エラーを返す
+        raise HTTPException(status_code=401, detail="Access token is missing")
+
+    try:
+        create_secret_code_param = CreateSecretCodeParam(access_token=access_token)
+        # SaaSus API を使用して 認証アプリケーション登録用のシークレットコードを作成
+        response = SaasUserApi(api_client=api_client).create_secret_code(user_id=auth_user.id, create_secret_code_param=create_secret_code_param)
+        # Google Authenticator などで使用する QR コード URL を生成
+        qr_code_url = f"otpauth://totp/SaaSusPlatform:{auth_user.email}?secret={response.secret_code}&issuer=SaaSusPlatform"
+        # QR コード URL を返す
+        return {"qrCodeUrl": qr_code_url}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# MFAの認証コードを検証する
+class VerifyMfaRequest(BaseModel):
+    verification_code: str  # ユーザーが入力するMFA認証コード
+
+# ユーザーのMFA認証コードを検証
+# フロントエンドアプリは、リクエストヘッダーに X-Access-Token を含める必要があります
+@app.post("/mfa_verify")
+def verify_mfa(request: Request, mfa_request: VerifyMfaRequest, auth_user: dict = Depends(fastapi_auth)):
+    # リクエストヘッダーから X-Access-Token を取得
+    access_token = request.headers.get("X-Access-Token")
+    if not access_token:
+        # アクセストークンがない場合は、認証エラーを返す
+        raise HTTPException(status_code=401, detail="Access token is missing")
+
+    try:
+        update_software_token_param = UpdateSoftwareTokenParam(
+            access_token=access_token,
+            verification_code=mfa_request.verification_code
+        )
+
+        # SaaSus API を使用して 認証アプリケーションを登録
+        SaasUserApi(api_client=api_client).update_software_token(
+            user_id=auth_user.id, 
+            update_software_token_param=update_software_token_param
+        )
+
+        return {"message": "MFA verification successful"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# MFAを有効化する
+@app.post("/mfa_enable")
+def enable_mfa(auth_user: dict = Depends(fastapi_auth)):
+    try:
+        # MFA を有効化するためのリクエストボディを作成
+        body = MfaPreference(enabled=True, method='softwareToken')
+
+        # SaaSus API を使用して MFA を有効化
+        SaasUserApi(api_client=api_client).update_user_mfa_preference(user_id=auth_user.id, body=body)
+
+        return {"message": "MFA has been enabled"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# MFAを無効化する
+@app.post("/mfa_disable")
+def disable_mfa(auth_user: dict = Depends(fastapi_auth)):
+    try:
+        # MFA を無効化するためのリクエストボディを作成
+        body = MfaPreference(enabled=False, method='softwareToken')
+
+        # SaaSus API を使用して MFA を無効化
+        SaasUserApi(api_client=api_client).update_user_mfa_preference(user_id=auth_user.id, body=body)
+
+        return {"message": "MFA has been disabled"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
