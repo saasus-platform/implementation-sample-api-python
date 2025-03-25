@@ -28,6 +28,6 @@ export SAASUS_SECRET_KEY="xxxxxxxxxx"
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-pip install git+https://github.com/saasus-platform/saasus-sdk-python.git@feature/v1
+pip install git+https://github.com/saasus-platform/saasus-sdk-python.git
 sudo uvicorn main:app --port 80 --reload
 ```
