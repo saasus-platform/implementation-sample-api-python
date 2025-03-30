@@ -496,6 +496,7 @@ def get_invitations(auth_user: dict = Depends(fastapi_auth), tenant_id: Optional
         raise HTTPException(status_code=400, detail="Tenant that does not belong")
 
     try:
+        # テナントの全招待を取得
         invitations_info = InvitationApi(api_client=api_client).get_tenant_invitations(tenant_id=tenant_id)
 
         return invitations_info.invitations
