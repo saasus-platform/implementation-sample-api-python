@@ -190,7 +190,7 @@ async def user_register(request: UserRegisterRequest, auth_user: dict = Depends(
 
         # ユーザー属性情報でnumber型が定義されている場合は、置換する
         if user_attribute_values is None:
-            user_attribute_values = []
+            user_attribute_values = {}
         else:
             user_attributes = user_attributes_obj.user_attributes
             for attribute in user_attributes:
