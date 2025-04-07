@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam, TenantProps
+from saasus_sdk_python.src.auth import SaasUserApi, TenantApi, TenantUserApi, TenantAttributeApi, UserAttributeApi, RoleApi, CreateSaasUserParam, CreateTenantUserParam, CreateTenantUserRolesParam, TenantProps, CreateTenantInvitationParam, InvitedUserEnvironmentInformationInner, InvitationApi
 from saasus_sdk_python.src.pricing import PricingPlansApi
 from saasus_sdk_python.callback.callback import Callback
 from saasus_sdk_python.middleware.middleware import Authenticate
@@ -480,5 +480,77 @@ def logout(response: Response):
     
     return {"message": "Logged out successfully"}
 
+# 招待一覧取得
+@app.get("/invitations")
+def get_invitations(auth_user: dict = Depends(fastapi_auth), tenant_id: Optional[str] = Query(None)):
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    # クエリパラメータでテナントIDが渡されていない場合はエラー
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="No tenant found for the user")
+
+    # ユーザーが所属しているテナントか確認する
+    is_belonging_tenant = belonging_tenant(auth_user.tenants, tenant_id)
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
+
+    try:
+        # テナントの全招待を取得
+        invitations_info = InvitationApi(api_client=api_client).get_tenant_invitations(tenant_id=tenant_id)
+
+        return invitations_info.invitations
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# ユーザー招待用のPydanticモデルを定義
+class UserRegisterRequest(BaseModel):
+    email: str
+    tenantId: str
+
+
+# ユーザー招待
+@app.post("/user_invitation")
+async def user_invitation(fast_request: Request, request: UserRegisterRequest, auth_user: dict = Depends(fastapi_auth)):
+    # リクエストデータの取得
+    email = request.email
+    tenant_id = request.tenantId
+
+    if not auth_user.tenants:
+        raise HTTPException(status_code=400, detail="No tenants found for the user")
+
+    is_belonging_tenant = belonging_tenant(auth_user.tenants, tenant_id)
+    if not is_belonging_tenant:
+        raise HTTPException(status_code=400, detail="Tenant that does not belong")
+
+    # ユーザー招待処理
+    try:
+        # 招待を作成するユーザーのアクセストークンを取得
+        access_token = fast_request.headers.get("X-Access-Token")
+
+        # アクセストークンがリクエストヘッダーに含まれていなかったらエラー
+        if not access_token:
+            raise HTTPException(status_code=401, detail="Access token is missing")
+        
+        # テナント招待のパラメータを作成
+        invited_user_environment_information_inner = InvitedUserEnvironmentInformationInner(
+            id=3, # 本番環境のid:3を指定
+            role_names=['admin']
+        )
+        create_tenant_invitation_param = CreateTenantInvitationParam(
+            email=email,
+            access_token=access_token,
+            envs=[invited_user_environment_information_inner]
+        )
+
+        # テナントへの招待を作成
+        InvitationApi(api_client=api_client).create_tenant_invitation(tenant_id=tenant_id, create_tenant_invitation_param=create_tenant_invitation_param)
+
+        return {"message": "Create tenant user invitation successfully"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
