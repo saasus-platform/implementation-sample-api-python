@@ -551,10 +551,6 @@ async def user_invitation(fast_request: Request, request: UserRegisterRequest, a
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=80)
-
 # MFAの状態を取得
 @app.get("/mfa_status")
 def get_mfa_status(auth_user: dict = Depends(fastapi_auth), request: Request = None):
@@ -653,3 +649,9 @@ def disable_mfa(auth_user: dict = Depends(fastapi_auth)):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
+
+# billing_router をインポートしてマウント
+from billing_router import router as billing_router
+app.include_router(billing_router)
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=80)
