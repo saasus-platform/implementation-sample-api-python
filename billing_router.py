@@ -14,8 +14,10 @@ from saasus_sdk_python.src.auth import TenantApi
 from saasus_sdk_python.src.pricing import (
     PricingPlansApi,
     MeteringApi,
+    TaxRateApi,
     UpdateMeteringUnitTimestampCountParam,
     UpdateMeteringUnitTimestampCountMethod,
+    UpdateMeteringUnitTimestampCountNowParam,
 )
 from saasus_sdk_python.client.auth_client import SignedAuthApiClient
 from saasus_sdk_python.client.pricing_client import SignedPricingApiClient
@@ -153,6 +155,7 @@ def calculate_metering_unit_billings(
 
             billings.append({
                 "metering_unit_name": unit_name,
+                "metering_unit_type": unit_type,
                 "function_menu_name": menu_name,
                 "period_count": count,
                 "currency": curr,
@@ -185,8 +188,35 @@ def get_billing_dashboard(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=plan_id)
-    TenantApi(api_client=api_client).get_tenant(tenant_id=tenant_id)  # テナント検証のみ
 
+    tenant_api = TenantApi(api_client=api_client)
+    tenant = tenant_api.get_tenant(tenant_id=tenant_id)
+
+    # 1. プラン履歴をソート
+    sorted_histories = sorted(
+        tenant.plan_histories,
+        key=lambda h: h.plan_applied_at
+    )
+
+    # 2. 適用開始が period_start 以前で、plan_id が一致する履歴を探す
+    matched_history = next(
+        (
+            h for h in reversed(sorted_histories)
+            if h.plan_id == plan_id and h.plan_applied_at <= period_start
+        ),
+        None
+    )
+
+    # 3. 税率を取得（該当する tax_rate_id がある場合）
+    matched_tax = None
+    if matched_history and matched_history.tax_rate_id:
+        tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
+        for tax in tax_rates.tax_rates:
+            if tax.id == matched_history.tax_rate_id:
+                matched_tax = tax
+                break
+
+    # 4. 課金計算
     billings, totals = calculate_metering_unit_billings(
         tenant_id, period_start, period_end, plan
     )
@@ -199,11 +229,12 @@ def get_billing_dashboard(
             "display_name": plan.display_name,
             "description": plan.description,
         },
+        "tax_rate": matched_tax,
     }
 
 
 @router.get(
-    "/tenant/plan_periods",
+    "/billing/plan_periods",
     summary="Get available plan periods for a tenant",
 )
 def get_plan_periods(
@@ -264,6 +295,8 @@ def get_plan_periods(
 
             seg_end = min(nxt - timedelta(seconds=1), end_dt)
 
+            if seg_end <= cur:
+                break
             label = f"{cur:%Y年%m月%d日 %H:%M:%S} ～ {seg_end:%Y年%m月%d日 %H:%M:%S}"
             results.append({
                 "label": label,
@@ -281,10 +314,10 @@ def get_plan_periods(
     return results
 
 @router.post(
-    "/metering/{tenant_id}/{unit}/{ts}",
+    "/billing/metering/{tenant_id}/{unit}/{ts}",
     summary="Update metering count at specified timestamp"
 )
-def update_metering_count(
+def update_count_of_specified_timestamp(
     tenant_id: str,
     unit: str,
     ts: int,
@@ -303,5 +336,29 @@ def update_metering_count(
         metering_unit_name=unit,
         timestamp=ts,
         update_metering_unit_timestamp_count_param=param,
+    )
+    return resp
+
+@router.post(
+    "/billing/metering/{tenant_id}/{unit}",
+    summary="Update metering count at current timestamp"
+)
+def update_count_of_now(
+    tenant_id: str,
+    unit: str,
+    body: UpdateCountBody,
+    auth_user: Any = Depends(fastapi_auth),
+):
+    if not has_billing_access(auth_user, tenant_id):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    param = UpdateMeteringUnitTimestampCountNowParam(
+        method=UpdateMeteringUnitTimestampCountMethod(body.method),
+        count=body.count,
+    )
+    resp = MeteringApi(api_client=pricing_api_client).update_metering_unit_timestamp_count_now(
+        tenant_id=tenant_id,
+        metering_unit_name=unit,
+        update_metering_unit_timestamp_count_now_param=param,
     )
     return resp
