@@ -6,9 +6,6 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# main.py から認証依存とテナント所属チェックをインポート
-from main import fastapi_auth, belonging_tenant
-
 # SaaS SDK のクライアント
 from saasus_sdk_python.src.auth import TenantApi
 from saasus_sdk_python.src.pricing import (
@@ -21,6 +18,8 @@ from saasus_sdk_python.src.pricing import (
 )
 from saasus_sdk_python.client.auth_client import SignedAuthApiClient
 from saasus_sdk_python.client.pricing_client import SignedPricingApiClient
+
+from dependencies import fastapi_auth, belonging_tenant
 
 # API クライアント初期化
 api_client = SignedAuthApiClient()
@@ -81,7 +80,7 @@ def calc_tiered(count: float, unit_dict: Dict[str, Any]) -> float:
     last = None
     for tier in tiers:
         last = tier
-        if tier["inf"] or count <= t["to"]:
+        if tier["inf"] or count <= tier["to"]:
             return tier["flat_amount"] + count * tier["unit_price"]
     if last:
         return last["flat_amount"] + count * last["unit_price"]
@@ -133,21 +132,21 @@ def calculate_metering_unit_billings(
 
             count = usage_cache.get(unit_name, 0.0)
             if unit_type != "fixed" and count == 0:
-              resp = MeteringApi(api_client=pricing_api_client).get_metering_unit_date_count_by_tenant_id_and_unit_name_and_date_period(
-                tenant_id=tenant_id,
-                metering_unit_name=unit_name,
-                start_timestamp=period_start,
-                end_timestamp=period_end,
-              )
-              counts = resp.counts
+                resp = MeteringApi(api_client=pricing_api_client).get_metering_unit_date_count_by_tenant_id_and_unit_name_and_date_period(
+                    tenant_id=tenant_id,
+                    metering_unit_name=unit_name,
+                    start_timestamp=period_start,
+                    end_timestamp=period_end,
+                )
+                counts = resp.counts
 
-              if agg_usage == "max":
-                  # 最大値を返す
-                  count = max((c.count for c in counts), default=0)
-              else:
-                  # 合計値を返す
-                  count = sum(c.count for c in counts)
-                  usage_cache[unit_name] = count
+                if agg_usage == "max":
+                    # 最大値を返す
+                    count = max((c.count for c in counts), default=0)
+                else:
+                    # 合計値を返す
+                    count = sum(c.count for c in counts)
+                usage_cache[unit_name] = count
 
             amount = calculate_amount_by_unit_type(count, unit_dict)
             curr = unit_dict.get("currency", "")
