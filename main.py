@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+from dependencies import fastapi_auth, belonging_tenant
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -41,16 +43,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# FastAPI用の認証メソッド
-def fastapi_auth(request: Request) -> Union[dict, HTTPException]:
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.replace("Bearer ", "") if "Bearer " in auth_header else ""
-    referer = request.headers.get("X-Saasus-Referer", "")
-    user_info, error = auth.authenticate(id_token=token, referer=referer)
-    if error:
-        raise HTTPException(status_code=401, detail=str(error))
-    return user_info
+# billing_router をインポートしてマウント
+from billing_router import router as billing_router
+app.include_router(billing_router)
 
 
 # 一時コードを取得する
@@ -69,18 +64,6 @@ def get_db():
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
-
-
-# ユーザーが所属しているテナントか確認する
-def belonging_tenant(tenants: dict, tenant_id: str):
-    is_belonging_tenant = False
-    for tenant in tenants:
-        if tenant.id == tenant_id:
-            is_belonging_tenant = True
-            break
-
-    return is_belonging_tenant
-
 
 @app.get("/credentials")
 def get_credentials(request: Request):
@@ -551,10 +534,6 @@ async def user_invitation(fast_request: Request, request: UserRegisterRequest, a
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=80)
-
 # MFAの状態を取得
 @app.get("/mfa_status")
 def get_mfa_status(auth_user: dict = Depends(fastapi_auth), request: Request = None):
@@ -653,3 +632,6 @@ def disable_mfa(auth_user: dict = Depends(fastapi_auth)):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=80)
