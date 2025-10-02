@@ -1,7 +1,7 @@
 # billing_router.py
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -36,9 +36,9 @@ class UpdateCountBody(BaseModel):
     count: int = Field(..., ge=0)
 
 class UpdateTenantPlanRequest(BaseModel):
-    next_plan_id: str
-    tax_rate_id: str = None
-    using_next_plan_from: int = None
+    next_plan_id: Optional[str] = None
+    tax_rate_id: Optional[str] = None
+    using_next_plan_from: Optional[int] = None
 
 
 # --- 認可ヘルパー ---
@@ -382,7 +382,7 @@ def get_pricing_plans(auth_user: Any = Depends(fastapi_auth)):
         plans = PricingPlansApi(api_client=pricing_api_client).get_pricing_plans()
         return plans.pricing_plans
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to retrieve pricing plans")
 
 
 @router.get(
@@ -399,7 +399,7 @@ def get_tax_rates(auth_user: Any = Depends(fastapi_auth)):
         tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
         return tax_rates.tax_rates
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to retrieve tax rates")
 
 
 @router.get(
@@ -470,17 +470,21 @@ def update_tenant_plan(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     
     try:
-        # テナントプランを更新
-        plan_reservation = PlanReservation(
-            next_plan_id=request.next_plan_id
-        )
+        # PlanReservationオブジェクトを作成（指定されたフィールドのみ設定）
+        plan_reservation_kwargs = {}
+        
+        # next_plan_idがNoneでない場合は設定（空文字も含む）
+        if request.next_plan_id is not None:
+            plan_reservation_kwargs['next_plan_id'] = request.next_plan_id
+        
+        plan_reservation = PlanReservation(**plan_reservation_kwargs)
         
         # 税率IDが指定されている場合のみ設定
-        if request.tax_rate_id and request.tax_rate_id != "":
+        if request.tax_rate_id:
             plan_reservation.next_plan_tax_rate_id = request.tax_rate_id
         
         # using_next_plan_fromが指定されている場合のみ設定
-        if request.using_next_plan_from and request.using_next_plan_from > 0:
+        if request.using_next_plan_from is not None and request.using_next_plan_from > 0:
             plan_reservation.using_next_plan_from = request.using_next_plan_from
         
         # テナントプランを更新
