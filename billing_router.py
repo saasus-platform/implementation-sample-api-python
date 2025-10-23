@@ -406,9 +406,6 @@ def get_tenant_plan_info(
     auth_user: Any = Depends(fastapi_auth)
 ):
     # テナントプラン情報を取得する
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id is required")
-    
     # 管理者権限チェック
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -458,9 +455,6 @@ def update_tenant_plan(
     auth_user: Any = Depends(fastapi_auth)
 ):
     # テナントプランを更新する
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id is required")
-    
     # 管理者権限チェック
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
