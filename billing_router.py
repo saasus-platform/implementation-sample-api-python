@@ -374,9 +374,6 @@ def update_count_of_now(
 )
 def get_pricing_plans(auth_user: Any = Depends(fastapi_auth)):
     # プラン一覧を取得する
-    if not auth_user.tenants:
-        raise HTTPException(status_code=400, detail="No tenants found for the user")
-    
     try:
         # 料金プラン一覧を取得
         plans = PricingPlansApi(api_client=pricing_api_client).get_pricing_plans()
@@ -391,14 +388,12 @@ def get_pricing_plans(auth_user: Any = Depends(fastapi_auth)):
 )
 def get_tax_rates(auth_user: Any = Depends(fastapi_auth)):
     # 税率一覧を取得する
-    if not auth_user.tenants:
-        raise HTTPException(status_code=400, detail="No tenants found for the user")
-    
     try:
         # 税率一覧を取得
         tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
         return tax_rates.tax_rates
     except Exception as e:
+        print(f"TaxRateApi error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve tax rates")
 
 
@@ -449,6 +444,7 @@ def get_tenant_plan_info(
         
         return response
     except Exception as e:
+        print(f"TenantApi error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve tenant detail")
 
 
@@ -495,4 +491,5 @@ def update_tenant_plan(
         
         return {"message": "Tenant plan updated successfully"}
     except Exception as e:
+        print(f"TenantApi error: {e}")
         raise HTTPException(status_code=500, detail="Failed to update tenant plan")
