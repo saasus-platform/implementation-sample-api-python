@@ -1,13 +1,14 @@
 # billing_router.py
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 # SaaS SDK のクライアント
 from saasus_sdk_python.src.auth import TenantApi
+from saasus_sdk_python.src.auth.models.plan_reservation import PlanReservation
 from saasus_sdk_python.src.pricing import (
     PricingPlansApi,
     MeteringApi,
@@ -33,6 +34,11 @@ router = APIRouter(
 class UpdateCountBody(BaseModel):
     method: str = Field(..., pattern="^(add|sub|direct)$")
     count: int = Field(..., ge=0)
+
+class UpdateTenantPlanRequest(BaseModel):
+    next_plan_id: Optional[str] = None
+    tax_rate_id: Optional[str] = None
+    using_next_plan_from: Optional[int] = None
 
 
 # --- 認可ヘルパー ---
@@ -361,3 +367,123 @@ def update_count_of_now(
         update_metering_unit_timestamp_count_now_param=param,
     )
     return resp
+
+@router.get(
+    "/pricing_plans",
+    summary="Get pricing plans list"
+)
+def get_pricing_plans(auth_user: Any = Depends(fastapi_auth)):
+    # プラン一覧を取得する
+    try:
+        # 料金プラン一覧を取得
+        plans = PricingPlansApi(api_client=pricing_api_client).get_pricing_plans()
+        return plans.pricing_plans
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to retrieve pricing plans")
+
+
+@router.get(
+    "/tax_rates",
+    summary="Get tax rates list"
+)
+def get_tax_rates(auth_user: Any = Depends(fastapi_auth)):
+    # 税率一覧を取得する
+    try:
+        # 税率一覧を取得
+        tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
+        return tax_rates.tax_rates
+    except Exception as e:
+        print(f"TaxRateApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve tax rates")
+
+
+@router.get(
+    "/tenants/{tenant_id}/plan",
+    summary="Get tenant plan information"
+)
+def get_tenant_plan_info(
+    tenant_id: str,
+    auth_user: Any = Depends(fastapi_auth)
+):
+    # テナントプラン情報を取得する
+    # 管理者権限チェック
+    if not has_billing_access(auth_user, tenant_id):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        # テナント詳細情報を取得
+        tenant = TenantApi(api_client=api_client).get_tenant(tenant_id=tenant_id)
+        
+        # 現在のプランの税率情報を取得（プラン履歴の最新エントリから）
+        current_tax_rate_id = None
+        if tenant.plan_histories:
+            latest_plan_history = tenant.plan_histories[-1]
+            if latest_plan_history.tax_rate_id:
+                current_tax_rate_id = latest_plan_history.tax_rate_id
+        
+        # レスポンスを構築
+        response = {
+            "id": tenant.id,
+            "name": tenant.name,
+            "plan_id": tenant.plan_id,
+            "tax_rate_id": current_tax_rate_id,
+            "plan_reservation": None,
+        }
+        
+        # 予約情報がある場合は追加（using_next_plan_fromで判定）
+        if hasattr(tenant, 'using_next_plan_from') and tenant.using_next_plan_from is not None:
+            plan_reservation = {
+                "next_plan_id": getattr(tenant, 'next_plan_id', None),
+                "using_next_plan_from": tenant.using_next_plan_from,
+                "next_plan_tax_rate_id": getattr(tenant, 'next_plan_tax_rate_id', None),
+            }
+            response["plan_reservation"] = plan_reservation
+        
+        return response
+    except Exception as e:
+        print(f"TenantApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve tenant detail")
+
+
+@router.put(
+    "/tenants/{tenant_id}/plan",
+    summary="Update tenant plan"
+)
+def update_tenant_plan(
+    tenant_id: str,
+    request: UpdateTenantPlanRequest,
+    auth_user: Any = Depends(fastapi_auth)
+):
+    # テナントプランを更新する
+    # 管理者権限チェック
+    if not has_billing_access(auth_user, tenant_id):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        # PlanReservationオブジェクトを作成（指定されたフィールドのみ設定）
+        plan_reservation_kwargs = {}
+        
+        # next_plan_idがNoneでない場合は設定（空文字も含む）
+        if request.next_plan_id is not None:
+            plan_reservation_kwargs['next_plan_id'] = request.next_plan_id
+        
+        plan_reservation = PlanReservation(**plan_reservation_kwargs)
+        
+        # 税率IDが指定されている場合のみ設定
+        if request.tax_rate_id:
+            plan_reservation.next_plan_tax_rate_id = request.tax_rate_id
+        
+        # using_next_plan_fromが指定されている場合のみ設定
+        if request.using_next_plan_from is not None and request.using_next_plan_from > 0:
+            plan_reservation.using_next_plan_from = request.using_next_plan_from
+        
+        # テナントプランを更新
+        TenantApi(api_client=api_client).update_tenant_plan(
+            tenant_id=tenant_id,
+            body=plan_reservation
+        )
+        
+        return {"message": "Tenant plan updated successfully"}
+    except Exception as e:
+        print(f"TenantApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update tenant plan")
