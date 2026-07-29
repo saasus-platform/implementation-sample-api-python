@@ -13,7 +13,8 @@ async def fastapi_auth(request: Request) -> Union[dict, HTTPException]:
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.replace("Bearer ", "") if "Bearer " in auth_header else ""
     referer = request.headers.get("X-Saasus-Referer", "")
-    user_info, error = auth.authenticate(id_token=token, referer=referer)
+    x_saasus_trace_id = request.headers.get("X-SaaSus-Trace-Id", "")
+    user_info, error = auth.authenticate(id_token=token, referer=referer, x_saasus_trace_id=x_saasus_trace_id)
     if error:
         raise HTTPException(status_code=401, detail=str(error))
     return user_info
