@@ -261,7 +261,7 @@ def get_plan_periods(
 
     try:
         # テナント取得
-        tenant = TenantApi(api_client=SignedAuthApiClient()).get_tenant(tenant_id=tenant_id)
+        tenant = TenantApi(api_client=api_client).get_tenant(tenant_id=tenant_id)
 
         # 1) 境界エッジ作成（PlanAppliedAt 昇順）
         edges = sorted(
@@ -284,7 +284,6 @@ def get_plan_periods(
         results: List[Dict[str, Any]] = []
 
         # 3) 各エッジごとに区間を分割
-        pricing_client = SignedPricingApiClient()
         for idx, e in enumerate(edges):
             plan_id = e["plan_id"]
             if not plan_id:
@@ -297,7 +296,7 @@ def get_plan_periods(
             )
 
             # 4) この境界のプランを取得し、年単位／月単位を判定
-            plan = PricingPlansApi(api_client=pricing_client).get_pricing_plan(plan_id=e["plan_id"])
+            plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=e["plan_id"])
             recurring = "year" if plan_has_year_unit(plan) else "month"
 
             cur = start_dt
