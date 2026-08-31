@@ -1,13 +1,17 @@
 # billing_router.py
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dateutil.relativedelta import relativedelta
+
+JST = ZoneInfo("Asia/Tokyo")
 
 # SaaS SDK のクライアント
 from saasus_sdk_python.src.auth import TenantApi
+from saasus_sdk_python.src.auth.models.plan_reservation import PlanReservation
 from saasus_sdk_python.src.pricing import (
     PricingPlansApi,
     MeteringApi,
@@ -33,6 +37,11 @@ router = APIRouter(
 class UpdateCountBody(BaseModel):
     method: str = Field(..., pattern="^(add|sub|direct)$")
     count: int = Field(..., ge=0)
+
+class UpdateTenantPlanRequest(BaseModel):
+    next_plan_id: Optional[str] = None
+    tax_rate_id: Optional[str] = None
+    using_next_plan_from: Optional[int] = None
 
 
 # --- 認可ヘルパー ---
@@ -186,50 +195,56 @@ def get_billing_dashboard(
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=plan_id)
+    try:
+        plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=plan_id)
 
-    tenant_api = TenantApi(api_client=api_client)
-    tenant = tenant_api.get_tenant(tenant_id=tenant_id)
+        tenant_api = TenantApi(api_client=api_client)
+        tenant = tenant_api.get_tenant(tenant_id=tenant_id)
 
-    # 1. プラン履歴をソート
-    sorted_histories = sorted(
-        tenant.plan_histories,
-        key=lambda h: h.plan_applied_at
-    )
+        # 1. プラン履歴をソート
+        sorted_histories = sorted(
+            tenant.plan_histories,
+            key=lambda h: h.plan_applied_at
+        )
 
-    # 2. 適用開始が period_start 以前で、plan_id が一致する履歴を探す
-    matched_history = next(
-        (
-            h for h in reversed(sorted_histories)
-            if h.plan_id == plan_id and h.plan_applied_at <= period_start
-        ),
-        None
-    )
+        # 2. 適用開始が period_start 以前で、plan_id が一致する履歴を探す
+        matched_history = next(
+            (
+                h for h in reversed(sorted_histories)
+                if h.plan_id == plan_id and h.plan_applied_at <= period_start
+            ),
+            None
+        )
 
-    # 3. 税率を取得（該当する tax_rate_id がある場合）
-    matched_tax = None
-    if matched_history and matched_history.tax_rate_id:
-        tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
-        for tax in tax_rates.tax_rates:
-            if tax.id == matched_history.tax_rate_id:
-                matched_tax = tax
-                break
+        # 3. 税率を取得（該当する tax_rate_id がある場合）
+        matched_tax = None
+        if matched_history and matched_history.tax_rate_id:
+            tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
+            for tax in tax_rates.tax_rates:
+                if tax.id == matched_history.tax_rate_id:
+                    matched_tax = tax
+                    break
 
-    # 4. 課金計算
-    billings, totals = calculate_metering_unit_billings(
-        tenant_id, period_start, period_end, plan
-    )
+        # 4. 課金計算
+        billings, totals = calculate_metering_unit_billings(
+            tenant_id, period_start, period_end, plan
+        )
 
-    return {
-        "summary": {"total_by_currency": totals, "total_metering_units": len(billings)},
-        "metering_unit_billings": billings,
-        "pricing_plan_info": {
-            "plan_id": plan_id,
-            "display_name": plan.display_name,
-            "description": plan.description,
-        },
-        "tax_rate": matched_tax,
-    }
+        return {
+            "summary": {"total_by_currency": totals, "total_metering_units": len(billings)},
+            "metering_unit_billings": billings,
+            "pricing_plan_info": {
+                "plan_id": plan_id,
+                "display_name": plan.display_name,
+                "description": plan.description,
+            },
+            "tax_rate": matched_tax,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"BillingDashboard error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get billing dashboard")
 
 
 @router.get(
@@ -244,73 +259,78 @@ def get_plan_periods(
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # テナント取得
-    tenant = TenantApi(api_client=SignedAuthApiClient()).get_tenant(tenant_id=tenant_id)
+    try:
+        # テナント取得
+        tenant = TenantApi(api_client=api_client).get_tenant(tenant_id=tenant_id)
 
-    # 1) 境界エッジ作成（PlanAppliedAt 昇順）
-    edges = sorted(
-        [
-            {
-                "plan_id": plan_history.plan_id or "",
-                "applied_at": datetime.fromtimestamp(plan_history.plan_applied_at)
-            }
-            for plan_history in getattr(tenant, "plan_histories", [])
-        ],
-        key=lambda e: e["applied_at"]
-    )
-
-    # 2) 最終境界（current_plan_period_end があればその 1 秒前、無ければ「今」）
-    if getattr(tenant, "current_plan_period_end", None):
-        last_boundary = datetime.fromtimestamp(tenant.current_plan_period_end - 1)
-    else:
-        last_boundary = datetime.now()
-
-    results: List[Dict[str, Any]] = []
-
-    # 3) 各エッジごとに区間を分割
-    pricing_client = SignedPricingApiClient()
-    for idx, e in enumerate(edges):
-        plan_id = e["plan_id"]
-        if not plan_id:
-            continue
-        start_dt = e["applied_at"]
-        end_dt = (
-            edges[idx + 1]["applied_at"] - timedelta(seconds=1)
-            if idx + 1 < len(edges)
-            else last_boundary
+        # 1) 境界エッジ作成（PlanAppliedAt 昇順）
+        edges = sorted(
+            [
+                {
+                    "plan_id": plan_history.plan_id or "",
+                    "applied_at": datetime.fromtimestamp(plan_history.plan_applied_at, tz=JST)
+                }
+                for plan_history in getattr(tenant, "plan_histories", [])
+            ],
+            key=lambda e: e["applied_at"]
         )
 
-        # 4) この境界のプランを取得し、年単位／月単位を判定
-        plan = PricingPlansApi(api_client=pricing_client).get_pricing_plan(plan_id=e["plan_id"])
-        recurring = "year" if plan_has_year_unit(plan) else "month"
+        # 2) 最終境界（current_plan_period_end があればその 1 秒前、無ければ「今」）
+        if getattr(tenant, "current_plan_period_end", None):
+            last_boundary = datetime.fromtimestamp(tenant.current_plan_period_end - 1, tz=JST)
+        else:
+            last_boundary = datetime.now(tz=JST)
 
-        cur = start_dt
-        while cur <= end_dt:
-            # 5) セグメントの終端を計算
-            if recurring == "year":
-                nxt = cur.replace(year=cur.year + 1)
-            else:
-                nxt = cur + relativedelta(months=1)
+        results: List[Dict[str, Any]] = []
 
-            seg_end = min(nxt - timedelta(seconds=1), end_dt)
+        # 3) 各エッジごとに区間を分割
+        for idx, e in enumerate(edges):
+            plan_id = e["plan_id"]
+            if not plan_id:
+                continue
+            start_dt = e["applied_at"]
+            end_dt = (
+                edges[idx + 1]["applied_at"] - timedelta(seconds=1)
+                if idx + 1 < len(edges)
+                else last_boundary
+            )
 
-            if seg_end <= cur:
-                break
-            label = f"{cur:%Y年%m月%d日 %H:%M:%S} ～ {seg_end:%Y年%m月%d日 %H:%M:%S}"
-            results.append({
-                "label": label,
-                "plan_id": e["plan_id"],
-                "start": int(cur.timestamp()),
-                "end": int(seg_end.timestamp()),
-            })
+            # 4) この境界のプランを取得し、年単位／月単位を判定
+            plan = PricingPlansApi(api_client=pricing_api_client).get_pricing_plan(plan_id=e["plan_id"])
+            recurring = "year" if plan_has_year_unit(plan) else "month"
 
-            if seg_end >= end_dt:
-                break
-            cur = seg_end + timedelta(seconds=1)
+            cur = start_dt
+            while cur <= end_dt:
+                # 5) セグメントの終端を計算
+                if recurring == "year":
+                    nxt = cur.replace(year=cur.year + 1)
+                else:
+                    nxt = cur + relativedelta(months=1)
 
-    # 6) 新しい順にソートして返却
-    results.sort(key=lambda x: x["start"], reverse=True)
-    return results
+                seg_end = min(nxt - timedelta(seconds=1), end_dt)
+
+                if seg_end <= cur:
+                    break
+                label = f"{cur:%Y年%m月%d日 %H:%M:%S} ～ {seg_end:%Y年%m月%d日 %H:%M:%S}"
+                results.append({
+                    "label": label,
+                    "plan_id": e["plan_id"],
+                    "start": int(cur.timestamp()),
+                    "end": int(seg_end.timestamp()),
+                })
+
+                if seg_end >= end_dt:
+                    break
+                cur = seg_end + timedelta(seconds=1)
+
+        # 6) 新しい順にソートして返却
+        results.sort(key=lambda x: x["start"], reverse=True)
+        return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"PlanPeriods error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get plan periods")
 
 @router.post(
     "/billing/metering/{tenant_id}/{unit}/{ts}",
@@ -326,17 +346,23 @@ def update_count_of_specified_timestamp(
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    param = UpdateMeteringUnitTimestampCountParam(
-        method=UpdateMeteringUnitTimestampCountMethod(body.method),
-        count=body.count,
-    )
-    resp = MeteringApi(api_client=pricing_api_client).update_metering_unit_timestamp_count(
-        tenant_id=tenant_id,
-        metering_unit_name=unit,
-        timestamp=ts,
-        update_metering_unit_timestamp_count_param=param,
-    )
-    return resp
+    try:
+        param = UpdateMeteringUnitTimestampCountParam(
+            method=UpdateMeteringUnitTimestampCountMethod(body.method),
+            count=body.count,
+        )
+        resp = MeteringApi(api_client=pricing_api_client).update_metering_unit_timestamp_count(
+            tenant_id=tenant_id,
+            metering_unit_name=unit,
+            timestamp=ts,
+            update_metering_unit_timestamp_count_param=param,
+        )
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"UpdateMeteringTimestamp error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update metering count")
 
 @router.post(
     "/billing/metering/{tenant_id}/{unit}",
@@ -351,13 +377,139 @@ def update_count_of_now(
     if not has_billing_access(auth_user, tenant_id):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    param = UpdateMeteringUnitTimestampCountNowParam(
-        method=UpdateMeteringUnitTimestampCountMethod(body.method),
-        count=body.count,
-    )
-    resp = MeteringApi(api_client=pricing_api_client).update_metering_unit_timestamp_count_now(
-        tenant_id=tenant_id,
-        metering_unit_name=unit,
-        update_metering_unit_timestamp_count_now_param=param,
-    )
-    return resp
+    try:
+        param = UpdateMeteringUnitTimestampCountNowParam(
+            method=UpdateMeteringUnitTimestampCountMethod(body.method),
+            count=body.count,
+        )
+        resp = MeteringApi(api_client=pricing_api_client).update_metering_unit_timestamp_count_now(
+            tenant_id=tenant_id,
+            metering_unit_name=unit,
+            update_metering_unit_timestamp_count_now_param=param,
+        )
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"UpdateMeteringNow error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update metering count")
+
+@router.get(
+    "/pricing_plans",
+    summary="Get pricing plans list"
+)
+def get_pricing_plans(auth_user: Any = Depends(fastapi_auth)):
+    # プラン一覧を取得する
+    try:
+        # 料金プラン一覧を取得
+        plans = PricingPlansApi(api_client=pricing_api_client).get_pricing_plans()
+        return plans.pricing_plans
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to retrieve pricing plans")
+
+
+@router.get(
+    "/tax_rates",
+    summary="Get tax rates list"
+)
+def get_tax_rates(auth_user: Any = Depends(fastapi_auth)):
+    # 税率一覧を取得する
+    try:
+        # 税率一覧を取得
+        tax_rates = TaxRateApi(api_client=pricing_api_client).get_tax_rates()
+        return tax_rates.tax_rates
+    except Exception as e:
+        print(f"TaxRateApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve tax rates")
+
+
+@router.get(
+    "/tenants/{tenant_id}/plan",
+    summary="Get tenant plan information"
+)
+def get_tenant_plan_info(
+    tenant_id: str,
+    auth_user: Any = Depends(fastapi_auth)
+):
+    # テナントプラン情報を取得する
+    # 管理者権限チェック
+    if not has_billing_access(auth_user, tenant_id):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        # テナント詳細情報を取得
+        tenant = TenantApi(api_client=api_client).get_tenant(tenant_id=tenant_id)
+        
+        # 現在のプランの税率情報を取得（プラン履歴の最新エントリから）
+        current_tax_rate_id = None
+        if tenant.plan_histories:
+            latest_plan_history = tenant.plan_histories[-1]
+            if latest_plan_history.tax_rate_id:
+                current_tax_rate_id = latest_plan_history.tax_rate_id
+        
+        # レスポンスを構築
+        response = {
+            "id": tenant.id,
+            "name": tenant.name,
+            "plan_id": tenant.plan_id,
+            "tax_rate_id": current_tax_rate_id,
+            "plan_reservation": None,
+        }
+        
+        # 予約情報がある場合は追加（using_next_plan_fromで判定）
+        if hasattr(tenant, 'using_next_plan_from') and tenant.using_next_plan_from is not None:
+            plan_reservation = {
+                "next_plan_id": getattr(tenant, 'next_plan_id', None),
+                "using_next_plan_from": tenant.using_next_plan_from,
+                "next_plan_tax_rate_id": getattr(tenant, 'next_plan_tax_rate_id', None),
+            }
+            response["plan_reservation"] = plan_reservation
+        
+        return response
+    except Exception as e:
+        print(f"TenantApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve tenant detail")
+
+
+@router.put(
+    "/tenants/{tenant_id}/plan",
+    summary="Update tenant plan"
+)
+def update_tenant_plan(
+    tenant_id: str,
+    request: UpdateTenantPlanRequest,
+    auth_user: Any = Depends(fastapi_auth)
+):
+    # テナントプランを更新する
+    # 管理者権限チェック
+    if not has_billing_access(auth_user, tenant_id):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        # PlanReservationオブジェクトを作成（指定されたフィールドのみ設定）
+        plan_reservation_kwargs = {}
+        
+        # next_plan_idがNoneでない場合は設定（空文字も含む）
+        if request.next_plan_id is not None:
+            plan_reservation_kwargs['next_plan_id'] = request.next_plan_id
+        
+        plan_reservation = PlanReservation(**plan_reservation_kwargs)
+        
+        # 税率IDが指定されている場合のみ設定
+        if request.tax_rate_id:
+            plan_reservation.next_plan_tax_rate_id = request.tax_rate_id
+        
+        # using_next_plan_fromが指定されている場合のみ設定
+        if request.using_next_plan_from is not None and request.using_next_plan_from > 0:
+            plan_reservation.using_next_plan_from = request.using_next_plan_from
+        
+        # テナントプランを更新
+        TenantApi(api_client=api_client).update_tenant_plan(
+            tenant_id=tenant_id,
+            body=plan_reservation
+        )
+        
+        return {"message": "Tenant plan updated successfully"}
+    except Exception as e:
+        print(f"TenantApi error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update tenant plan")
